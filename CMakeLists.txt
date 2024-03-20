@@ -10,6 +10,8 @@ set(COMMON_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/include")
 include_directories(${COMMON_INCLUDE_DIR} ${INCLUDE_PATH})
 
 find_package(OpenSSL REQUIRED)
+find_package(OpenCV REQUIRED)
+include_directories( ${OpenCV_INCLUDE_DIRS} )   
 
 add_subdirectory(foxglove_pb)
 
@@ -21,3 +23,13 @@ target_link_libraries(server_protobuf PRIVATE protobuf)
 target_link_libraries(server_protobuf PRIVATE pthread)
 target_link_libraries(server_protobuf PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 target_link_libraries(server_protobuf PRIVATE z)
+
+add_executable(rm_robot_sim src/rm_robot_sim.cpp include/robot/robot_armor.hpp)
+target_include_directories(rm_robot_sim PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(rm_robot_sim PRIVATE ${LIB_PATH}/libfoxglove_websocket.a)
+target_link_libraries(rm_robot_sim PRIVATE foxglove_pb)
+target_link_libraries(rm_robot_sim PRIVATE protobuf)
+target_link_libraries(rm_robot_sim PRIVATE pthread)
+target_link_libraries(rm_robot_sim PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(rm_robot_sim PRIVATE z)
+target_link_libraries(rm_robot_sim PRIVATE  ${OpenCV_LIBS})
