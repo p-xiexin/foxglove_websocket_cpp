@@ -152,17 +152,6 @@ public:
     }
 
 private:
-    std::vector<Cube> armor_;
-
-    double radius_ = 0.21; // 机器人装甲板环绕半径
-    Eigen::Matrix3d R_wb = Eigen::Matrix3d::Identity(); // 从世界坐标系到机器人身体坐标系的变换
-    Eigen::Vector3d t_wb = Eigen::Vector3d::Zero(); 
-
-    Eigen::Vector3d velocity_ = Eigen::Vector3d::Zero(); // 机器人速度
-    Eigen::Vector3d angularVelocity_ = Eigen::Vector3d::Zero(); // 机器人三轴角速度
-
-    std::string frame_id_;
-
     // 初始化装甲板
     void initializeArmor() {
         double radius = radius_;
@@ -194,4 +183,16 @@ private:
         armor_.emplace_back(back_offset, back_orientation, frame_id_);
         armor_.emplace_back(right_offset, right_orientation, frame_id_);
     }
+
+private:
+    std::vector<Cube> armor_;
+
+    double radius_ = 0.21; // 机器人装甲板环绕半径
+    Eigen::Matrix3d R_wb = Eigen::Matrix3d::Identity(); // 从世界坐标系到机器人身体坐标系的变换
+    Eigen::Vector3d t_wb = Eigen::Vector3d::Zero(); 
+
+    Eigen::Vector3d velocity_ = Eigen::Vector3d::Zero(); // 机器人速度
+    Eigen::Vector3d angularVelocity_ = Eigen::Vector3d::Zero(); // 机器人三轴角速度
+
+    std::string frame_id_;
 };

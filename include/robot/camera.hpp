@@ -91,15 +91,6 @@ public:
     }
 
 private:
-    Eigen::Matrix3d intrinsic_matrix_; // 摄像头内参
-    // 摄像头外参，为相机姿态的逆变换
-    Eigen::Matrix3d extrinsic_rotation_ = Eigen::Matrix3d::Identity();
-    Eigen::Vector3d extrinsic_translation_ = Eigen::Vector3d::Zero();
-    Eigen::Matrix3d R_bc_ = Eigen::Matrix3d::Identity(); // 从机体坐标系到相机坐标系的变换，相机的姿态
-    Eigen::Vector3d t_bc_ = Eigen::Vector3d::Zero();
-    Eigen::Vector3d physical_size_ = Eigen::Vector3d::Zero(); // 相机在真实世界中的尺寸
-    std::vector<double> distortion_params_; // 畸变参数
-
     // 应用畸变参数
     void applyDistortion(Eigen::Vector3d& point) const {
         double k1 = distortion_params_[0];
@@ -118,4 +109,14 @@ private:
         point.x() = x_distorted;
         point.y() = y_distorted;
     }
+
+private:
+    Eigen::Matrix3d intrinsic_matrix_; // 摄像头内参
+    // 摄像头外参，为相机姿态的逆变换
+    Eigen::Matrix3d extrinsic_rotation_ = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d extrinsic_translation_ = Eigen::Vector3d::Zero();
+    Eigen::Matrix3d R_bc_ = Eigen::Matrix3d::Identity(); // 从机体坐标系到相机坐标系的变换，相机的姿态
+    Eigen::Vector3d t_bc_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d physical_size_ = Eigen::Vector3d::Zero(); // 相机在真实世界中的尺寸
+    std::vector<double> distortion_params_; // 畸变参数
 };
