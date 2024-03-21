@@ -24,7 +24,7 @@ target_link_libraries(server_protobuf PRIVATE pthread)
 target_link_libraries(server_protobuf PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 target_link_libraries(server_protobuf PRIVATE z)
 
-add_executable(rm_robot_sim src/rm_robot_sim.cpp include/robot/robot_armor.hpp)
+add_executable(rm_robot_sim src/rm_robot_sim.cpp include/robot/robot_armor.hpp include/robot/camera.hpp)
 target_include_directories(rm_robot_sim PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(rm_robot_sim PRIVATE ${LIB_PATH}/libfoxglove_websocket.a)
 target_link_libraries(rm_robot_sim PRIVATE foxglove_pb)

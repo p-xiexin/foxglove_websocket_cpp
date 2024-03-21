@@ -1,14 +1,13 @@
 #include <Eigen/Dense>
 #include <vector>
 
-
-#define CUBE_LENGTH 0.019
-#define CUBE_WIDTH 0.135
-#define CUBE_HEIGHT 0.124
+#define CUBE_LENGTH 0.135
+#define CUBE_WIDTH 0.124
+#define CUBE_HEIGHT 0.019
 
 struct Cube {
     Eigen::Vector4d color = Eigen::Vector4d(0.2, 0.6, 1.0, 1.0); // 颜色，使用Eigen的Vector4d表示，分别表示rgba(归一化)
-    Eigen::Vector3d size = Eigen::Vector3d(CUBE_LENGTH, CUBE_WIDTH, CUBE_HEIGHT); // 尺寸，使用Eigen的Vector3d表示
+    Eigen::Vector3d size = Eigen::Vector3d(CUBE_WIDTH, CUBE_LENGTH, CUBE_HEIGHT); // 尺寸，使用Eigen的Vector3d表示
     Eigen::Matrix3d R_bc = Eigen::Matrix3d::Identity(); // 从机器人身体坐标系到装甲板坐标系的变换
     Eigen::Vector3d t_bc = Eigen::Vector3d::Zero(); 
     std::string frame_id;
@@ -96,6 +95,30 @@ public:
         return std::make_pair(pose_quaternion, pose_translation);
     }
 
+    std::vector<Eigen::Vector3d> getCube4Point3d(int index) const {
+        if (index < 0 || index >= armor_.size()) {
+            throw std::out_of_range("Invalid armor index");
+        }
+        const Cube& cube = armor_[index];
+
+        Eigen::Vector3d center = R_wb * cube.t_bc + t_wb; // 计算装甲板中心在世界坐标系中的位置
+
+        // 计算装甲板的上、下、左、右四个点的相对位置
+        Eigen::Vector3d left_top_offset(-cube.size.x() / 2, cube.size.y() / 2, 0.0);
+        Eigen::Vector3d left_bottom_offset(-cube.size.x() / 2, -cube.size.y() / 2, 0.0);
+        Eigen::Vector3d right_bottom_offset(cube.size.x() / 2, -cube.size.y() / 2, 0.0);
+        Eigen::Vector3d right_top_offset(cube.size.x() / 2, cube.size.y() / 2, 0.0);
+
+        // 将相对位置转换到世界坐标系中
+        Eigen::Vector3d left_top_point = R_wb * cube.R_bc * left_top_offset + center;
+        Eigen::Vector3d left_bottom_point = R_wb * cube.R_bc * left_bottom_offset + center;
+        Eigen::Vector3d right_bottom_point = R_wb * cube.R_bc * right_bottom_offset + center;
+        Eigen::Vector3d right_top_point = R_wb * cube.R_bc * right_top_offset + center;
+
+        // 返回四个点的坐标
+        return {left_top_point, left_bottom_point, right_bottom_point, right_top_point};
+    }
+
     // 设置机器人位置
     void setPosition(const Eigen::Vector3d& position) {
         t_wb = position;
@@ -150,10 +173,21 @@ private:
         Eigen::Vector3d right_offset(0.0, -radius, 0.0);
         
         // 计算装甲板相对于机体的姿态
-        Eigen::Quaterniond front_orientation(euler2Rotation(Eigen::Vector3d(0.0, -M_PI/20, 0.0)));
-        Eigen::Quaterniond left_orientation(euler2Rotation(Eigen::Vector3d(0.0, -M_PI/20, M_PI/2)));
-        Eigen::Quaterniond back_orientation(euler2Rotation(Eigen::Vector3d(0.0, -M_PI/20, M_PI)));
-        Eigen::Quaterniond right_orientation(euler2Rotation(Eigen::Vector3d(0.0, -M_PI/20, -M_PI/2)));
+        double armor_pitch = M_PI/2 -M_PI/20;
+        Eigen::Quaterniond front_orientation(euler2Rotation(Eigen::Vector3d(0.0, armor_pitch, 0.0)));
+        Eigen::Quaterniond left_orientation(euler2Rotation(Eigen::Vector3d(0.0, armor_pitch, M_PI_2)));
+        Eigen::Quaterniond back_orientation(euler2Rotation(Eigen::Vector3d(0.0, armor_pitch, M_PI)));
+        Eigen::Quaterniond right_orientation(euler2Rotation(Eigen::Vector3d(0.0, armor_pitch, -M_PI_2)));
+        // Eigen::Quaterniond front_orientation(Eigen::AngleAxisd(armor_pitch, Eigen::Vector3d::UnitY()));
+
+        // Eigen::Quaterniond left_orientation(Eigen::AngleAxisd(armor_pitch, Eigen::Vector3d::UnitY()) *
+        //                                     Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitZ()));
+
+        // Eigen::Quaterniond back_orientation(Eigen::AngleAxisd(armor_pitch, Eigen::Vector3d::UnitY()) *
+        //                                     Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ()));
+
+        // Eigen::Quaterniond right_orientation(Eigen::AngleAxisd(armor_pitch, Eigen::Vector3d::UnitY()) *
+        //                                     Eigen::AngleAxisd(-M_PI / 2, Eigen::Vector3d::UnitZ()));
 
         armor_.emplace_back(front_offset, front_orientation, frame_id_);
         armor_.emplace_back(left_offset, left_orientation, frame_id_);
