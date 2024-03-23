@@ -12,7 +12,7 @@ struct Cube {
     Eigen::Vector3d t_bc = Eigen::Vector3d::Zero(); 
     std::string frame_id;
 
-    Cube(const Eigen::Vector3d& offset, const Eigen::Quaterniond& orientation, const std::string& id)
+    Cube(const Eigen::Vector3d& offset, const Eigen::Quaterniond& orientation, const std::string &id)
     : R_bc(orientation.toRotationMatrix()), t_bc(offset), frame_id(id) {}
     Cube(const std::string& id) : frame_id(id) {} // 构造函数初始化frame id
     Cube() {};
@@ -39,7 +39,7 @@ Eigen::Matrix3d euler2Rotation( Eigen::Vector3d  eulerAngles)
 class Robot {
 public:
     // 构造函数，初始化四个装甲板
-    Robot(const Eigen::Vector3d& position, const double& radius, std::string& id)
+    Robot(const Eigen::Vector3d& position, const double& radius, const std::string& id)
         : t_wb(position), radius_(radius), frame_id_(id)
 
     {
