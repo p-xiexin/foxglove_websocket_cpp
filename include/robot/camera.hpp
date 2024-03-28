@@ -55,11 +55,12 @@ public:
     }
 
     // 将世界坐标系下的点转换为相机像素坐标系下的点
-    std::vector<Eigen::Vector2d> worldToPixel(const std::vector<Eigen::Vector3d>& world_points) const {
+    std::vector<Eigen::Vector2d> worldToPixel(const std::vector<Eigen::Vector3d>& world_points, Eigen::Matrix3d R_wb, Eigen::Vector3d t_wb) const {
         std::vector<Eigen::Vector2d> pixel_points;
 
         for (const auto& world_point : world_points) {
-            Eigen::Vector3d camera_point = extrinsic_rotation_ * world_point + extrinsic_translation_; // 将点从世界坐标系转换到相机坐标系
+            Eigen::Vector3d body_point = R_wb.transpose() * (world_point - t_wb); // 将点从世界坐标系转换到机体坐标系
+            Eigen::Vector3d camera_point = extrinsic_rotation_ * body_point + extrinsic_translation_; // 将点从机体坐标系转换到相机坐标系
             Eigen::Vector3d pixel_point = intrinsic_matrix_ * camera_point; // 将点从相机坐标系转换到像素坐标系
 
             // 归一化像素坐标
@@ -112,7 +113,7 @@ private:
 
 private:
     Eigen::Matrix3d intrinsic_matrix_; // 摄像头内参
-    // 摄像头外参，为相机姿态的逆变换
+    // 摄像头外参，为机体坐标系到相机姿态的逆变换
     Eigen::Matrix3d extrinsic_rotation_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d extrinsic_translation_ = Eigen::Vector3d::Zero();
     Eigen::Matrix3d R_bc_ = Eigen::Matrix3d::Identity(); // 从机体坐标系到相机坐标系的变换，相机的姿态

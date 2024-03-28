@@ -69,8 +69,12 @@ const Eigen::Matrix3d intrinsic_matrix = [] {
               0, 0, 1;
     return matrix;
 }();
-const Eigen::Matrix3d rotation = Eigen::Matrix3d(Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitY()) * Eigen::AngleAxisd(-M_PI / 2, Eigen::Vector3d::UnitZ()));
-const Eigen::Vector3d translation(0.2, 0, 0.5);
+
+const Eigen::Matrix3d Rbc = Eigen::Matrix3d(Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitY()) * Eigen::AngleAxisd(-M_PI / 2, Eigen::Vector3d::UnitZ()));
+const Eigen::Vector3d tbc(0.05, 0.5, 0.05);
+const double yaw = 0, pitch = M_PI/20;
+const Eigen::Matrix3d Rwb = Eigen::Matrix3d(Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) * Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()));
+const Eigen::Vector3d twb = Rwb * Eigen::Vector3d(0.2, 0, 0.5); // 后一项是imu相对于转轴的偏移
 
 std::vector<std::vector<Eigen::Vector2d>> armorPixelPoints;
 
@@ -148,7 +152,7 @@ int main()
 	Robot enemy_robot(initial_position, robot_radius, "root");
 
 	// 初始化自身相机
-    Camera camera(intrinsic_matrix, rotation, translation);
+    Camera camera(intrinsic_matrix, Rbc, tbc);
 	camera.setPhysicalSize(Eigen::Vector3d(0.04, 0.04, 0.08));
 	camera.setDistortionParams({0, 0, 0, 0});
 
@@ -172,11 +176,17 @@ int main()
 		serializedMsgs.emplace_back(scene_msg.SerializeAsString());
 
 		// channel1：坐标变换
+		auto pose = enemy_robot.getCubePose(1);
+		auto Rcw = Rbc.transpose() * Rwb.transpose() * pose.first;
+		auto tcw = Rbc.transpose() * (Rwb.transpose() * (pose.second - twb) - tbc);
 		foxglove::FrameTransform frame_robot = createFrameTransformMessage("root", "robot", enemy_robot.getOrientation(), enemy_robot.getPosition());
-		foxglove::FrameTransform frame_camera = createFrameTransformMessage("root", "camera", camera.getCameraPose().first, camera.getCameraPose().second);
-		foxglove::FrameTransform frame_armor = createFrameTransformMessage("root", "armor", enemy_robot.getCubePose(1).first, enemy_robot.getCubePose(1).second);
+		foxglove::FrameTransform frame_imu = createFrameTransformMessage("root", "imu", Eigen::Quaterniond(Rwb), twb);
+		foxglove::FrameTransform frame_camera = createFrameTransformMessage("imu", "camera", camera.getCameraPose().first, camera.getCameraPose().second);
+		// foxglove::FrameTransform frame_armor = createFrameTransformMessage("root", "armor", enemy_robot.getCubePose(1).first, enemy_robot.getCubePose(1).second);
+		foxglove::FrameTransform frame_armor = createFrameTransformMessage("camera", "armor", Eigen::Quaterniond(Rcw), tcw);
 		foxglove::FrameTransforms frame_msg;
 		*frame_msg.add_transforms() = frame_robot;
+		*frame_msg.add_transforms() = frame_imu;
 		*frame_msg.add_transforms() = frame_camera;
 		*frame_msg.add_transforms() = frame_armor;
 		serializedMsgs.emplace_back(frame_msg.SerializeAsString());
@@ -299,9 +309,13 @@ static void convertArmorToSceneEntity(foxglove::SceneEntity* entity, const Robot
 }
 
 static void convertCameraToSceneEntity(foxglove::SceneEntity* entity, const Camera& camera) {
-	auto pose = camera.getCameraPose();
-	const Eigen::Quaterniond& pose_quaternion = pose.first;
-	const Eigen::Vector3d& pose_translation = pose.second;
+	// auto pose = camera.getCameraPose();
+	// const Eigen::Quaterniond& pose_quaternion = pose.first;
+	// const Eigen::Vector3d& pose_translation = pose.second;
+	auto [quat, tbc] = camera.getCameraPose();
+	Eigen::Matrix3d Rbc(quat);
+	const Eigen::Quaterniond& pose_quaternion = Eigen::Quaterniond(Rwb * Rbc);
+	const Eigen::Vector3d& pose_translation = Rwb * tbc + twb;
 
 	auto *cube_msg = entity->add_cubes(); // 添加立方体
 
@@ -443,7 +457,7 @@ static void drawArmorPoints(const Robot& enemy_robot, const Camera& camera, cv::
 
     for (int i = 0; i < 4; ++i) {
         auto world_points = enemy_robot.getCube4Point3d(i);
-        auto pixel_points = camera.worldToPixel(world_points);
+        auto pixel_points = camera.worldToPixel(world_points, Rwb, twb);
         
         // 不同颜色绘制当前装甲板的像素坐标点
 		cv::Scalar color;
@@ -481,4 +495,19 @@ static void drawArmorPoints(const Robot& enemy_robot, const Camera& camera, cv::
 
 std::vector<std::vector<Eigen::Vector2d>> get_armorPixelPoints(){
 	return armorPixelPoints;
+}
+
+Eigen::Vector3d pixel2world(const cv::Point& pixelPoint, const Camera& camera) {
+    // 将像素坐标转换为归一化坐标
+    double u = pixelPoint.x / IMAGE_WIDTH;
+    double v = pixelPoint.y / IMAGE_HEIGHT;
+
+    // 将归一化坐标转换为相机坐标系下的坐标
+    Eigen::Vector3d cameraPoint;
+    cameraPoint << u, v, 1.0; // z = 1.0，因为相机坐标系中 z 轴与图像平面平行
+
+    // 将相机坐标系下的坐标转换为机体坐标系下的坐标
+    Eigen::Vector3d worldPoint = camera.getExtrinsicRotation().transpose() * (camera.getIntrinsicMatrix().inverse() * cameraPoint - camera.getExtrinsicTranslation());
+
+    return worldPoint;
 }
