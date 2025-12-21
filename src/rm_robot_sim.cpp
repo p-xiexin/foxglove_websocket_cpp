@@ -1,9 +1,7 @@
 #include <atomic>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <csignal>
-#include <functional>
 #include <iostream>
 #include <memory>
 #include <queue>
@@ -33,145 +31,13 @@
 #include "foxglove/CameraCalibration.pb.h"
 #include "robot/robot_armor.hpp"
 #include "robot/camera.hpp"
+#include "sim/armor_pnp_solver.hpp"
+#include "sim/armor_tracking_utils.hpp"
+#include "sim/extended_kalman_filter.hpp"
 
-// Simple PnP solver ported from rm_auto_aim to recover armor pose from 2D corners
-class ArmorPnPSolver
-{
-public:
-  ArmorPnPSolver(
-    const Eigen::Matrix3d & intrinsic, const std::vector<double> & distortion,
-    double armor_width, double armor_height)
-  : camera_matrix_(cv::Mat(3, 3, CV_64F)),
-    dist_coeffs_(cv::Mat::zeros(1, 5, CV_64F))
-  {
-    // Copy intrinsic parameters into OpenCV matrix
-    for (int i = 0; i < 3; ++i) {
-      for (int j = 0; j < 3; ++j) {
-        camera_matrix_.at<double>(i, j) = intrinsic(i, j);
-      }
-    }
-    for (size_t i = 0; i < std::min<size_t>(5, distortion.size()); ++i) {
-      dist_coeffs_.at<double>(i) = distortion[i];
-    }
-
-    const double half_w = armor_width * 0.5;
-    const double half_h = armor_height * 0.5;
-    // Points are on armor plane (z=0), matching getCube4Point3d order: left-top, left-bottom, right-bottom, right-top
-    armor_points_.emplace_back(cv::Point3f(-half_w, half_h, 0.0));   // left-top
-    armor_points_.emplace_back(cv::Point3f(-half_w, -half_h, 0.0));  // left-bottom
-    armor_points_.emplace_back(cv::Point3f(half_w, -half_h, 0.0));   // right-bottom
-    armor_points_.emplace_back(cv::Point3f(half_w, half_h, 0.0));    // right-top
-  }
-
-  bool solve(const std::vector<Eigen::Vector2d> & image_points, cv::Mat & rvec, cv::Mat & tvec) const
-  {
-    if (image_points.size() != 4) {
-      return false;
-    }
-
-    std::vector<cv::Point2f> cv_image_points;
-    cv_image_points.reserve(4);
-    // Use the same ordering as object points (lt, lb, rb, rt)
-    for (const auto & pt : image_points) {
-      cv_image_points.emplace_back(static_cast<float>(pt.x()), static_cast<float>(pt.y()));
-    }
-
-    if (std::any_of(cv_image_points.begin(), cv_image_points.end(), [](const cv::Point2f & p) {
-          return p.x < 0 || p.y < 0;
-        })) {
-      return false;
-    }
-
-    return cv::solvePnP(
-      armor_points_, cv_image_points, camera_matrix_, dist_coeffs_, rvec, tvec, false,
-      cv::SOLVEPNP_IPPE);
-  }
-
-  static double rvecToYaw(const cv::Mat & rvec)
-  {
-    cv::Mat R;
-    cv::Rodrigues(rvec, R);
-    return std::atan2(R.at<double>(1, 0), R.at<double>(0, 0));
-  }
-
-private:
-  cv::Mat camera_matrix_;
-  cv::Mat dist_coeffs_;
-  std::vector<cv::Point3f> armor_points_;
-};
-
-// Minimal Extended Kalman Filter ported from rm_auto_aim for smoothing armor pose
-class ExtendedKalmanFilter
-{
-public:
-  using VecVecFunc = std::function<Eigen::VectorXd(const Eigen::VectorXd &)>;
-  using VecMatFunc = std::function<Eigen::MatrixXd(const Eigen::VectorXd &)>;
-  using VoidMatFunc = std::function<Eigen::MatrixXd()>;
-
-  ExtendedKalmanFilter() = default;
-
-  explicit ExtendedKalmanFilter(
-    const VecVecFunc & f, const VecVecFunc & h, const VecMatFunc & j_f, const VecMatFunc & j_h,
-    const VoidMatFunc & u_q, const VecMatFunc & u_r, const Eigen::MatrixXd & P0)
-  : f_(f),
-    h_(h),
-    jacobian_f_(j_f),
-    jacobian_h_(j_h),
-    update_Q_(u_q),
-    update_R_(u_r),
-    P_post_(P0),
-    n_(static_cast<int>(P0.rows())),
-    I_(Eigen::MatrixXd::Identity(n_, n_)),
-    x_pri_(n_),
-    x_post_(n_)
-  {
-  }
-
-  void setState(const Eigen::VectorXd & x0) { x_post_ = x0; }
-
-  Eigen::MatrixXd predict()
-  {
-    F_ = jacobian_f_(x_post_);
-    Q_ = update_Q_();
-
-    x_pri_ = f_(x_post_);
-    P_pri_ = F_ * P_post_ * F_.transpose() + Q_;
-
-    x_post_ = x_pri_;
-    P_post_ = P_pri_;
-    return x_pri_;
-  }
-
-  Eigen::MatrixXd update(const Eigen::VectorXd & z)
-  {
-    H_ = jacobian_h_(x_pri_);
-    R_ = update_R_(z);
-
-    K_ = P_pri_ * H_.transpose() * (H_ * P_pri_ * H_.transpose() + R_).inverse();
-    x_post_ = x_pri_ + K_ * (z - h_(x_pri_));
-    P_post_ = (I_ - K_ * H_) * P_pri_;
-    return x_post_;
-  }
-
-private:
-  VecVecFunc f_;
-  VecVecFunc h_;
-  VecMatFunc jacobian_f_;
-  Eigen::MatrixXd F_;
-  VecMatFunc jacobian_h_;
-  Eigen::MatrixXd H_;
-  VoidMatFunc update_Q_;
-  Eigen::MatrixXd Q_;
-  VecMatFunc update_R_;
-  Eigen::MatrixXd R_;
-  Eigen::MatrixXd P_pri_;
-  Eigen::MatrixXd P_post_;
-  Eigen::MatrixXd K_;
-  int n_ = 0;
-  Eigen::MatrixXd I_;
-  Eigen::VectorXd x_pri_;
-  Eigen::VectorXd x_post_;
-};
+using sim::ArmorPnPSolver;
+using sim::ExtendedKalmanFilter;
+using sim::handleArmorJump;
 
 std::atomic<bool> running(true);
 
@@ -199,12 +65,10 @@ static void drawArmorPoints(const Robot& enemy_robot, const Camera& camera, cv::
 
 // 返回机器人看到的装甲板四个角点
 std::vector<std::vector<Eigen::Vector2d>> get_armorPixelPoints();
-static double yawFromRotation(const Eigen::Matrix3d & R);
 static Eigen::Vector3d cameraToWorld(const Eigen::Vector3d & p_c);
 static double yawCameraToWorld(double yaw_cam);
 static Eigen::Vector3d worldToCamera(const Eigen::Vector3d & p_w);
 static double yawWorldToCamera(double yaw_world);
-static void handleArmorJump(Eigen::Vector3d meas_world, double meas_world_yaw, Eigen::VectorXd & state);
 
 
 const double robot_radius = 0.52;						 // 机器人半径
@@ -446,7 +310,7 @@ int main()
 						}
 					}
 					Eigen::Matrix3d R_meas_world = Rwb * Rbc * R_meas_cam;
-					meas_world_yaw = yawFromRotation(R_meas_world);
+					meas_world_yaw = sim::yawFromRotation(R_meas_world);
 				}
 
 				// EKF in world frame
@@ -480,10 +344,10 @@ int main()
 				if (!armorPixelIndices.empty()) {
 					int armor_idx = armorPixelIndices.front();
 					auto pose = enemy_robot.getCubePose(armor_idx);
-					gt_yaw = yawFromRotation(Rbc.transpose() * Rwb.transpose() * pose.first.toRotationMatrix());
+					gt_yaw = sim::yawFromRotation(Rbc.transpose() * Rwb.transpose() * pose.first.toRotationMatrix());
 					gt_cam = Rbc.transpose() * (Rwb.transpose() * (pose.second - twb) - tbc);
 					gt_world = pose.second;
-					gt_world_yaw = yawFromRotation(pose.first.toRotationMatrix());
+					gt_world_yaw = sim::yawFromRotation(pose.first.toRotationMatrix());
 				}
 
 				if (log_counter++) {
@@ -845,11 +709,6 @@ std::vector<std::vector<Eigen::Vector2d>> get_armorPixelPoints(){
 	return armorPixelPoints;
 }
 
-static double yawFromRotation(const Eigen::Matrix3d & R)
-{
-    return std::atan2(R(1, 0), R(0, 0));
-}
-
 static Eigen::Vector3d cameraToWorld(const Eigen::Vector3d & p_c)
 {
 	return Rwb * (Rbc * p_c + tbc) + twb;
@@ -857,7 +716,7 @@ static Eigen::Vector3d cameraToWorld(const Eigen::Vector3d & p_c)
 
 static double yawCameraToWorld(double yaw_cam)
 {
-	const double yaw_cam_in_world = yawFromRotation(Rwb * Rbc);
+	const double yaw_cam_in_world = sim::yawFromRotation(Rwb * Rbc);
 	return yaw_cam + yaw_cam_in_world;
 }
 
@@ -868,24 +727,8 @@ static Eigen::Vector3d worldToCamera(const Eigen::Vector3d & p_w)
 
 static double yawWorldToCamera(double yaw_world)
 {
-	const double yaw_cam_in_world = yawFromRotation(Rwb * Rbc);
+	const double yaw_cam_in_world = sim::yawFromRotation(Rwb * Rbc);
 	return yaw_world - yaw_cam_in_world;
-}
-
-// Handle armor jump similar to rm_auto_aim Tracker::handleArmorJump:
-//  - reset yaw to measured yaw
-//  - recompute center from measured armor pose and radius
-//  - zero linear velocities to avoid divergence
-static void handleArmorJump(Eigen::Vector3d meas_world, double meas_world_yaw, Eigen::VectorXd & state)
-{
-	double r = state(8);
-	state(6) = meas_world_yaw;  // yaw
-	state(0) = meas_world.x() + r * std::cos(meas_world_yaw);  // xc
-	state(1) = 0.0;  // vxc
-	state(2) = meas_world.y() + r * std::sin(meas_world_yaw);  // yc
-	state(3) = 0.0;  // vyc
-	state(4) = meas_world.z();  // za
-	state(5) = 0.0;  // vza
 }
 
 Eigen::Vector3d pixel2world(const cv::Point& pixelPoint, const Camera& camera) {

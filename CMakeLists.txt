@@ -33,7 +33,16 @@ target_link_libraries(server_protobuf PRIVATE
                             ${OpenCV_LIBS} ${PROTOBUF_LIBRARY}
                       )
 
-add_executable(rm_robot_sim src/rm_robot_sim.cpp include/robot/robot_armor.hpp include/robot/camera.hpp)
+add_executable(rm_robot_sim
+  src/rm_robot_sim.cpp
+  src/armor_pnp_solver.cpp
+  src/extended_kalman_filter.cpp
+  include/robot/robot_armor.hpp
+  include/robot/camera.hpp
+  include/sim/armor_pnp_solver.hpp
+  include/sim/extended_kalman_filter.hpp
+  include/sim/armor_tracking_utils.hpp
+)
 target_link_libraries(rm_robot_sim PRIVATE 
                             foxglove_websocket
                             foxglove_pb
