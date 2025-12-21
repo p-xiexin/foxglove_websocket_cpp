@@ -1,12 +1,15 @@
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <queue>
 #include <thread>
 #include <unordered_set>
+#include <vector>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -30,6 +33,145 @@
 #include "foxglove/CameraCalibration.pb.h"
 #include "robot/robot_armor.hpp"
 #include "robot/camera.hpp"
+
+// Simple PnP solver ported from rm_auto_aim to recover armor pose from 2D corners
+class ArmorPnPSolver
+{
+public:
+  ArmorPnPSolver(
+    const Eigen::Matrix3d & intrinsic, const std::vector<double> & distortion,
+    double armor_width, double armor_height)
+  : camera_matrix_(cv::Mat(3, 3, CV_64F)),
+    dist_coeffs_(cv::Mat::zeros(1, 5, CV_64F))
+  {
+    // Copy intrinsic parameters into OpenCV matrix
+    for (int i = 0; i < 3; ++i) {
+      for (int j = 0; j < 3; ++j) {
+        camera_matrix_.at<double>(i, j) = intrinsic(i, j);
+      }
+    }
+    for (size_t i = 0; i < std::min<size_t>(5, distortion.size()); ++i) {
+      dist_coeffs_.at<double>(i) = distortion[i];
+    }
+
+    const double half_w = armor_width * 0.5;
+    const double half_h = armor_height * 0.5;
+    // Points are on armor plane (z=0), matching getCube4Point3d order: left-top, left-bottom, right-bottom, right-top
+    armor_points_.emplace_back(cv::Point3f(-half_w, half_h, 0.0));   // left-top
+    armor_points_.emplace_back(cv::Point3f(-half_w, -half_h, 0.0));  // left-bottom
+    armor_points_.emplace_back(cv::Point3f(half_w, -half_h, 0.0));   // right-bottom
+    armor_points_.emplace_back(cv::Point3f(half_w, half_h, 0.0));    // right-top
+  }
+
+  bool solve(const std::vector<Eigen::Vector2d> & image_points, cv::Mat & rvec, cv::Mat & tvec) const
+  {
+    if (image_points.size() != 4) {
+      return false;
+    }
+
+    std::vector<cv::Point2f> cv_image_points;
+    cv_image_points.reserve(4);
+    // Use the same ordering as object points (lt, lb, rb, rt)
+    for (const auto & pt : image_points) {
+      cv_image_points.emplace_back(static_cast<float>(pt.x()), static_cast<float>(pt.y()));
+    }
+
+    if (std::any_of(cv_image_points.begin(), cv_image_points.end(), [](const cv::Point2f & p) {
+          return p.x < 0 || p.y < 0;
+        })) {
+      return false;
+    }
+
+    return cv::solvePnP(
+      armor_points_, cv_image_points, camera_matrix_, dist_coeffs_, rvec, tvec, false,
+      cv::SOLVEPNP_IPPE);
+  }
+
+  static double rvecToYaw(const cv::Mat & rvec)
+  {
+    cv::Mat R;
+    cv::Rodrigues(rvec, R);
+    return std::atan2(R.at<double>(1, 0), R.at<double>(0, 0));
+  }
+
+private:
+  cv::Mat camera_matrix_;
+  cv::Mat dist_coeffs_;
+  std::vector<cv::Point3f> armor_points_;
+};
+
+// Minimal Extended Kalman Filter ported from rm_auto_aim for smoothing armor pose
+class ExtendedKalmanFilter
+{
+public:
+  using VecVecFunc = std::function<Eigen::VectorXd(const Eigen::VectorXd &)>;
+  using VecMatFunc = std::function<Eigen::MatrixXd(const Eigen::VectorXd &)>;
+  using VoidMatFunc = std::function<Eigen::MatrixXd()>;
+
+  ExtendedKalmanFilter() = default;
+
+  explicit ExtendedKalmanFilter(
+    const VecVecFunc & f, const VecVecFunc & h, const VecMatFunc & j_f, const VecMatFunc & j_h,
+    const VoidMatFunc & u_q, const VecMatFunc & u_r, const Eigen::MatrixXd & P0)
+  : f_(f),
+    h_(h),
+    jacobian_f_(j_f),
+    jacobian_h_(j_h),
+    update_Q_(u_q),
+    update_R_(u_r),
+    P_post_(P0),
+    n_(static_cast<int>(P0.rows())),
+    I_(Eigen::MatrixXd::Identity(n_, n_)),
+    x_pri_(n_),
+    x_post_(n_)
+  {
+  }
+
+  void setState(const Eigen::VectorXd & x0) { x_post_ = x0; }
+
+  Eigen::MatrixXd predict()
+  {
+    F_ = jacobian_f_(x_post_);
+    Q_ = update_Q_();
+
+    x_pri_ = f_(x_post_);
+    P_pri_ = F_ * P_post_ * F_.transpose() + Q_;
+
+    x_post_ = x_pri_;
+    P_post_ = P_pri_;
+    return x_pri_;
+  }
+
+  Eigen::MatrixXd update(const Eigen::VectorXd & z)
+  {
+    H_ = jacobian_h_(x_pri_);
+    R_ = update_R_(z);
+
+    K_ = P_pri_ * H_.transpose() * (H_ * P_pri_ * H_.transpose() + R_).inverse();
+    x_post_ = x_pri_ + K_ * (z - h_(x_pri_));
+    P_post_ = (I_ - K_ * H_) * P_pri_;
+    return x_post_;
+  }
+
+private:
+  VecVecFunc f_;
+  VecVecFunc h_;
+  VecMatFunc jacobian_f_;
+  Eigen::MatrixXd F_;
+  VecMatFunc jacobian_h_;
+  Eigen::MatrixXd H_;
+  VoidMatFunc update_Q_;
+  Eigen::MatrixXd Q_;
+  VecMatFunc update_R_;
+  Eigen::MatrixXd R_;
+  Eigen::MatrixXd P_pri_;
+  Eigen::MatrixXd P_post_;
+  Eigen::MatrixXd K_;
+  int n_ = 0;
+  Eigen::MatrixXd I_;
+  Eigen::VectorXd x_pri_;
+  Eigen::VectorXd x_post_;
+};
 
 std::atomic<bool> running(true);
 
@@ -57,6 +199,12 @@ static void drawArmorPoints(const Robot& enemy_robot, const Camera& camera, cv::
 
 // 返回机器人看到的装甲板四个角点
 std::vector<std::vector<Eigen::Vector2d>> get_armorPixelPoints();
+static double yawFromRotation(const Eigen::Matrix3d & R);
+static Eigen::Vector3d cameraToWorld(const Eigen::Vector3d & p_c);
+static double yawCameraToWorld(double yaw_cam);
+static Eigen::Vector3d worldToCamera(const Eigen::Vector3d & p_w);
+static double yawWorldToCamera(double yaw_world);
+static void handleArmorJump(Eigen::Vector3d meas_world, double meas_world_yaw, Eigen::VectorXd & state);
 
 
 const double robot_radius = 0.52;						 // 机器人半径
@@ -77,6 +225,7 @@ const Eigen::Matrix3d Rwb = Eigen::Matrix3d(Eigen::AngleAxisd(pitch, Eigen::Vect
 const Eigen::Vector3d twb = Rwb * Eigen::Vector3d(0.2, 0, 0.5); // 后一项是imu相对于转轴的偏移
 
 std::vector<std::vector<Eigen::Vector2d>> armorPixelPoints;
+std::vector<int> armorPixelIndices;
 
 int main()
 {
@@ -156,10 +305,97 @@ int main()
 	camera.setPhysicalSize(Eigen::Vector3d(0.04, 0.04, 0.08));
 	camera.setDistortionParams({0, 0, 0, 0});
 
+	ArmorPnPSolver pnp_solver(camera.getIntrinsicMatrix(), camera.getDistortionParams(), CUBE_WIDTH, CUBE_LENGTH);
+
+	double dt_seconds = 0.05;
+	// EKF process and observation models follow rm_auto_aim's tracker logic
+	auto f = [&dt_seconds](const Eigen::VectorXd & x) {
+		Eigen::VectorXd x_new = x;
+		x_new(0) += x(1) * dt_seconds;
+		x_new(2) += x(3) * dt_seconds;
+		x_new(4) += x(5) * dt_seconds;
+		x_new(6) += x(7) * dt_seconds;
+		return x_new;
+	};
+	auto j_f = [&dt_seconds](const Eigen::VectorXd &) {
+		Eigen::MatrixXd f_mat(9, 9);
+		f_mat <<  1,   dt_seconds, 0,   0,   0,   0,   0,   0,   0,
+				  0,   1,          0,   0,   0,   0,   0,   0,   0,
+				  0,   0,          1,   dt_seconds, 0,   0,   0,   0,   0, 
+				  0,   0,          0,   1,          0,   0,   0,   0,   0,
+				  0,   0,          0,   0,          1,   dt_seconds, 0,   0,   0,
+				  0,   0,          0,   0,          0,   1,   0,   0,   0,
+				  0,   0,          0,   0,          0,   0,   1,   dt_seconds, 0,
+				  0,   0,          0,   0,          0,   0,   0,   1,   0,
+				  0,   0,          0,   0,          0,   0,   0,   0,   1;
+		return f_mat;
+	};
+	auto h = [](const Eigen::VectorXd & x) {
+		Eigen::VectorXd z(4);
+		double xc = x(0), yc = x(2), yaw = x(6), r = x(8);
+		z(0) = xc - r * std::cos(yaw);
+		z(1) = yc - r * std::sin(yaw);
+		z(2) = x(4);
+		z(3) = x(6);
+		return z;
+	};
+	auto j_h = [](const Eigen::VectorXd & x) {
+		Eigen::MatrixXd h_mat(4, 9);
+		double yaw = x(6), r = x(8);
+		h_mat <<  1,   0,   0,   0,   0,   0,   r*std::sin(yaw), 0,   -std::cos(yaw),
+				  0,   0,   1,   0,   0,   0,   -r*std::cos(yaw),0,   -std::sin(yaw),
+				  0,   0,   0,   0,   1,   0,   0,               0,   0,
+				  0,   0,   0,   0,   0,   0,   1,               0,   0;
+		return h_mat;
+	};
+	double s2q_xyz = 20.0;
+	double s2q_yaw = 100.0;
+	double s2q_r = 800.0;
+	auto u_q = [&dt_seconds, &s2q_xyz, &s2q_yaw, &s2q_r]() {
+		Eigen::MatrixXd q(9, 9);
+		double t = dt_seconds, x = s2q_xyz, y = s2q_yaw, r = s2q_r;
+		double q_x_x = std::pow(t, 4) / 4 * x, q_x_vx = std::pow(t, 3) / 2 * x, q_vx_vx = std::pow(t, 2) * x;
+		double q_y_y = std::pow(t, 4) / 4 * y, q_y_vy = std::pow(t, 3) / 2 * x, q_vy_vy = std::pow(t, 2) * y;
+		double q_r = std::pow(t, 4) / 4 * r;
+		q <<  q_x_x,  q_x_vx, 0,      0,      0,      0,      0,      0,      0,
+			  q_x_vx, q_vx_vx,0,      0,      0,      0,      0,      0,      0,
+			  0,      0,      q_x_x,  q_x_vx, 0,      0,      0,      0,      0,
+			  0,      0,      q_x_vx, q_vx_vx,0,      0,      0,      0,      0,
+			  0,      0,      0,      0,      q_x_x,  q_x_vx, 0,      0,      0,
+			  0,      0,      0,      0,      q_x_vx, q_vx_vx,0,      0,      0,
+			  0,      0,      0,      0,      0,      0,      q_y_y,  q_y_vy, 0,
+			  0,      0,      0,      0,      0,      0,      q_y_vy, q_vy_vy,0,
+			  0,      0,      0,      0,      0,      0,      0,      0,      q_r;
+		return q;
+	};
+	double r_xyz_factor = 0.05;
+	double r_yaw = 0.02;
+	auto u_r = [&r_xyz_factor, &r_yaw](const Eigen::VectorXd & z) {
+		Eigen::DiagonalMatrix<double, 4> r;
+		double x = r_xyz_factor;
+		r.diagonal() << std::abs(x * z[0]), std::abs(x * z[1]), std::abs(x * z[2]), r_yaw;
+		return r;
+	};
+	Eigen::DiagonalMatrix<double, 9> p0;
+	p0.setIdentity();
+	ExtendedKalmanFilter ekf(f, h, j_f, j_h, u_q, u_r, p0);
+	bool ekf_initialized = false;
+	Eigen::VectorXd ekf_state(9);
+	auto last_predict_time = std::chrono::steady_clock::now();
+	int log_counter = 0;
+	const double armor_jump_yaw_diff = 1.0;  // rad
+
 	// 主循环，持续发送场景更新消息直到接收到关闭信号
 	while (running)
 	{
-		std::vector<std::string> serializedMsgs;
+		const auto now_time_point = std::chrono::steady_clock::now();
+		dt_seconds = std::chrono::duration<double>(now_time_point - last_predict_time).count();
+		if (dt_seconds <= 0.0) {
+			dt_seconds = 0.05;
+		}
+		last_predict_time = now_time_point;
+
+		std::vector<std::string> serializedMsgs(channelIds.size());
 		const auto now = nanosecondsSinceEpoch(); // 获取当前时间
 
 		// 更新机器人状态
@@ -173,7 +409,7 @@ int main()
 		entity->set_frame_id("root");           // 设置帧 ID
 		convertArmorToSceneEntity(entity, enemy_robot);
 		convertCameraToSceneEntity(entity, camera);
-		serializedMsgs.emplace_back(scene_msg.SerializeAsString());
+		serializedMsgs[0] = scene_msg.SerializeAsString();
 
 		// channel1：坐标变换
 		auto pose = enemy_robot.getCubePose(1);
@@ -185,21 +421,131 @@ int main()
 		// foxglove::FrameTransform frame_armor = createFrameTransformMessage("root", "armor", enemy_robot.getCubePose(1).first, enemy_robot.getCubePose(1).second);
 		foxglove::FrameTransform frame_armor = createFrameTransformMessage("camera", "armor", Eigen::Quaterniond(Rcw), tcw);
 		foxglove::FrameTransforms frame_msg;
-		*frame_msg.add_transforms() = frame_robot;
-		*frame_msg.add_transforms() = frame_imu;
-		*frame_msg.add_transforms() = frame_camera;
-		*frame_msg.add_transforms() = frame_armor;
-		serializedMsgs.emplace_back(frame_msg.SerializeAsString());
-
 		// channel2：图像
 		cv::Mat blackImage = cv::Mat::zeros(IMAGE_HEIGHT, IMAGE_WIDTH, CV_8UC3);
 		drawArmorPoints(enemy_robot, camera, blackImage);
 		foxglove::CompressedImage img_msg = createCompressedImageMessage(blackImage, "jpeg", "camera");
-		serializedMsgs.emplace_back(img_msg.SerializeAsString());
+		serializedMsgs[2] = img_msg.SerializeAsString();
+
+		// PnP measurement + EKF smoothing using rm_auto_aim workflow
+		if (!armorPixelPoints.empty()) {
+			cv::Mat rvec, tvec;
+			if (pnp_solver.solve(armorPixelPoints.front(), rvec, tvec)) {
+				Eigen::Vector3d meas_position(
+					tvec.at<double>(0), tvec.at<double>(1), tvec.at<double>(2));
+				double meas_yaw = ArmorPnPSolver::rvecToYaw(rvec);
+				Eigen::Vector3d meas_world = cameraToWorld(meas_position);
+				double meas_world_yaw = 0.0;
+				{
+					cv::Mat R_cv;
+					cv::Rodrigues(rvec, R_cv);
+					Eigen::Matrix3d R_meas_cam;
+					for (int i = 0; i < 3; ++i) {
+						for (int j = 0; j < 3; ++j) {
+							R_meas_cam(i, j) = R_cv.at<double>(i, j);
+						}
+					}
+					Eigen::Matrix3d R_meas_world = Rwb * Rbc * R_meas_cam;
+					meas_world_yaw = yawFromRotation(R_meas_world);
+				}
+
+				// EKF in world frame
+				Eigen::VectorXd z(4);
+				z << meas_world.x(), meas_world.y(), meas_world.z(), meas_world_yaw;
+
+				if (!ekf_initialized) {
+					ekf_state << z(0) + robot_radius * std::cos(meas_world_yaw), 0.0,
+						z(1) + robot_radius * std::sin(meas_world_yaw), 0.0, z(2), 0.0,
+						meas_world_yaw, 0.0,
+						robot_radius;
+					ekf.setState(ekf_state);
+					ekf_initialized = true;
+				} else {
+					ekf_state = ekf.predict();
+					ekf_state = ekf.update(z);
+				}
+
+				Eigen::Vector3d filtered_position = Eigen::Vector3d::Zero();  // world
+				double filtered_yaw = 0.0;  // world yaw
+				if (ekf_initialized) {
+					filtered_position = Eigen::Vector3d(ekf_state(0), ekf_state(2), ekf_state(4));
+					filtered_yaw = ekf_state(6);
+				}
+
+				// Ground truth armor (matching the projected armor index)
+				Eigen::Vector3d gt_cam = Eigen::Vector3d::Zero();
+				Eigen::Vector3d gt_world = Eigen::Vector3d::Zero();
+				double gt_yaw = 0.0;
+				double gt_world_yaw = 0.0;
+				if (!armorPixelIndices.empty()) {
+					int armor_idx = armorPixelIndices.front();
+					auto pose = enemy_robot.getCubePose(armor_idx);
+					gt_yaw = yawFromRotation(Rbc.transpose() * Rwb.transpose() * pose.first.toRotationMatrix());
+					gt_cam = Rbc.transpose() * (Rwb.transpose() * (pose.second - twb) - tbc);
+					gt_world = pose.second;
+					gt_world_yaw = yawFromRotation(pose.first.toRotationMatrix());
+				}
+
+				if (log_counter++) {
+					std::cout
+						<< "[PnP]\n"
+						<< "  meas      cam: " << meas_position.transpose()
+						<< " yaw " << meas_yaw
+						<< " | world: " << meas_world.transpose()
+						<< " yaw " << meas_world_yaw << "\n"
+						<< "  gt        cam: " << gt_cam.transpose()
+						<< " yaw " << gt_yaw
+						<< " | world: " << gt_world.transpose()
+						<< " yaw " << gt_world_yaw << "\n"
+						<< "  filtered  cam: " << worldToCamera(filtered_position).transpose()
+						<< " yaw " << yawWorldToCamera(filtered_yaw)
+						<< " | world: " << filtered_position.transpose()
+						<< " yaw " << filtered_yaw << "\n";
+
+					// Robot center state vs ground truth (world frame)
+					Eigen::Vector3d robot_gt_pos = enemy_robot.getPosition();
+					Eigen::Vector3d robot_gt_vel = enemy_robot.getVelocity();
+					std::cout << "  EKF center (world) pos: " << filtered_position.transpose()
+							  << " vel: [" << ekf_state(1) << ", " << ekf_state(3) << ", " << ekf_state(5) << "]"
+							  << " | GT pos: " << robot_gt_pos.transpose()
+							  << " vel: " << robot_gt_vel.transpose()
+							  << "\n";
+				}
+
+				// Armor jump handling: if yaw jumps while still seeing same armor, reset state to measurement
+				double yaw_diff = std::fabs(meas_world_yaw - filtered_yaw);
+				yaw_diff = std::fmod(yaw_diff + M_PI, 2 * M_PI) - M_PI;  // wrap to [-pi, pi]
+				if (std::fabs(yaw_diff) > armor_jump_yaw_diff && ekf_initialized) {
+					handleArmorJump(meas_world, meas_world_yaw, ekf_state);
+					ekf.setState(ekf_state);
+				}
+
+				if (ekf_initialized) {
+					// Publish both raw PnP armor pose and filtered center to help debugging
+					Eigen::Quaterniond meas_orientation(Eigen::AngleAxisd(meas_yaw, Eigen::Vector3d::UnitZ()));
+					foxglove::FrameTransform armor_pnp_tf = createFrameTransformMessage(
+						"camera", "armor_pnp", meas_orientation, meas_position);
+					*frame_msg.add_transforms() = armor_pnp_tf;
+
+					Eigen::Quaterniond filtered_orientation(
+						Eigen::AngleAxisd(yawWorldToCamera(filtered_yaw), Eigen::Vector3d::UnitZ()));
+					Eigen::Vector3d filtered_cam = worldToCamera(filtered_position);
+					foxglove::FrameTransform filtered_transform = createFrameTransformMessage(
+						"camera", "armor_filtered", filtered_orientation, filtered_cam);
+					*frame_msg.add_transforms() = filtered_transform;
+				}
+			}
+		}
+
+		*frame_msg.add_transforms() = frame_robot;
+		*frame_msg.add_transforms() = frame_imu;
+		*frame_msg.add_transforms() = frame_camera;
+		*frame_msg.add_transforms() = frame_armor;
+		serializedMsgs[1] = frame_msg.SerializeAsString();
 
 		// channel3：相机参数
 		foxglove::CameraCalibration cali_msg = createCameraCalibration(camera, IMAGE_WIDTH, IMAGE_HEIGHT, "plumb_bob", "camera");
-		serializedMsgs.emplace_back(cali_msg.SerializeAsString());
+		serializedMsgs[3] = cali_msg.SerializeAsString();
 
 		// 广播消息给所有订阅了相应频道的客户端
 		for (int i = 0; i < channelIds.size(); i++){
@@ -454,6 +800,7 @@ static bool isYawInRange(const Eigen::Quaterniond& pose_quaternion) {
 
 static void drawArmorPoints(const Robot& enemy_robot, const Camera& camera, cv::Mat& image) {
 	armorPixelPoints.clear();
+	armorPixelIndices.clear();
 
     for (int i = 0; i < 4; ++i) {
         auto world_points = enemy_robot.getCube4Point3d(i);
@@ -489,12 +836,56 @@ static void drawArmorPoints(const Robot& enemy_robot, const Camera& camera, cv::
 			cv::line(image, cv::Point(pixel_points[0].x(), pixel_points[0].y()), cv::Point(pixel_points[2].x(), pixel_points[2].y()), color, 2);
 			cv::line(image, cv::Point(pixel_points[1].x(), pixel_points[0].y()), cv::Point(pixel_points[3].x(), pixel_points[2].y()), color, 2);
 			armorPixelPoints.push_back(pixel_points);
+			armorPixelIndices.push_back(i);
 		}
     }
 }
 
 std::vector<std::vector<Eigen::Vector2d>> get_armorPixelPoints(){
 	return armorPixelPoints;
+}
+
+static double yawFromRotation(const Eigen::Matrix3d & R)
+{
+    return std::atan2(R(1, 0), R(0, 0));
+}
+
+static Eigen::Vector3d cameraToWorld(const Eigen::Vector3d & p_c)
+{
+	return Rwb * (Rbc * p_c + tbc) + twb;
+}
+
+static double yawCameraToWorld(double yaw_cam)
+{
+	const double yaw_cam_in_world = yawFromRotation(Rwb * Rbc);
+	return yaw_cam + yaw_cam_in_world;
+}
+
+static Eigen::Vector3d worldToCamera(const Eigen::Vector3d & p_w)
+{
+	return Rbc.transpose() * (Rwb.transpose() * (p_w - twb) - tbc);
+}
+
+static double yawWorldToCamera(double yaw_world)
+{
+	const double yaw_cam_in_world = yawFromRotation(Rwb * Rbc);
+	return yaw_world - yaw_cam_in_world;
+}
+
+// Handle armor jump similar to rm_auto_aim Tracker::handleArmorJump:
+//  - reset yaw to measured yaw
+//  - recompute center from measured armor pose and radius
+//  - zero linear velocities to avoid divergence
+static void handleArmorJump(Eigen::Vector3d meas_world, double meas_world_yaw, Eigen::VectorXd & state)
+{
+	double r = state(8);
+	state(6) = meas_world_yaw;  // yaw
+	state(0) = meas_world.x() + r * std::cos(meas_world_yaw);  // xc
+	state(1) = 0.0;  // vxc
+	state(2) = meas_world.y() + r * std::sin(meas_world_yaw);  // yc
+	state(3) = 0.0;  // vyc
+	state(4) = meas_world.z();  // za
+	state(5) = 0.0;  // vza
 }
 
 Eigen::Vector3d pixel2world(const cv::Point& pixelPoint, const Camera& camera) {

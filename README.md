@@ -31,7 +31,7 @@ RoboMaster 视觉自瞄环节算法迭代频繁、硬件调试成本高。单靠
 
 ## 下一步计划
 
-我们计划提供将 chenjun 的 rm-vision 对接本平台的示例工程，支持大家参考和体验目前优秀算法在纯仿真环境下的效果。
+* [x] 我们计划提供将 chenjun 的 [rm-vision](https://github.com/chenjunnn/rm_auto_aim) 对接本平台的示例工程，支持大家参考和体验目前优秀算法在纯仿真环境下的效果。
 
 ## 如何体验
 依赖于[foxglove/ws-protocol/cpp/foxglove-websocket](https://github.com/foxglove/ws-protocol/tree/main/cpp/foxglove-websocket)
@@ -42,13 +42,15 @@ RoboMaster 视觉自瞄环节算法迭代频繁、硬件调试成本高。单靠
    ```
 2. 按说明或参考代码编译运行，对接你的自瞄模块或适配仿真数据。
   ```bash
-  sudo apt install nlohmann-json3-dev
-  sudo apt install libwebsocketpp-dev
-  sudo apt install libprotobuf-dev
+  sudo apt update
+  sudo apt install -y nlohmann-json3-dev libwebsocketpp-dev libprotobuf-dev
   ./compile_proto.sh
   cmake . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=1
   cmake --build build -j
+  ./build/rm_robot_sim
   ```
+
+  打开https://app.foxglove.dev/可视化查看结果
 
 ## 关于本项目
 
